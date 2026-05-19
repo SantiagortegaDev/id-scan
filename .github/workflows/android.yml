@@ -1,0 +1,122 @@
+name: Build Android APK
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Regenerate Android project and restore configs
+        run: |
+          cp -r lib /tmp/lib_backup
+          cp -r assets /tmp/assets_backup 2>/dev/null || true
+          cp pubspec.yaml /tmp/pubspec_backup.yaml
+          cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest_backup.xml
+          cp android/app/build.gradle.kts /tmp/build_gradle_backup 2>/dev/null || true
+
+          cp -r android/app/src/main/res/mipmap-mdpi /tmp/mipmap_mdpi 2>/dev/null || true
+          cp -r android/app/src/main/res/mipmap-hdpi /tmp/mipmap_hdpi 2>/dev/null || true
+          cp -r android/app/src/main/res/mipmap-xhdpi /tmp/mipmap_xhdpi 2>/dev/null || true
+          cp -r android/app/src/main/res/mipmap-xxhdpi /tmp/mipmap_xxhdpi 2>/dev/null || true
+          cp -r android/app/src/main/res/mipmap-xxxhdpi /tmp/mipmap_xxxhdpi 2>/dev/null || true
+          cp -r android/app/src/main/res/drawable /tmp/drawable_backup 2>/dev/null || true
+          cp android/app/src/main/res/values/styles.xml /tmp/styles_backup.xml 2>/dev/null || true
+
+          cd /tmp
+          flutter create --org com.idscan --project-name app idscan_fresh
+
+          rm -rf "$GITHUB_WORKSPACE/android"
+          cp -r /tmp/idscan_fresh/android "$GITHUB_WORKSPACE/android"
+
+          cp /tmp/AndroidManifest_backup.xml "$GITHUB_WORKSPACE/android/app/src/main/AndroidManifest.xml"
+
+          RES_DIR="$GITHUB_WORKSPACE/android/app/src/main/res"
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            if [ -d "/tmp/mipmap_${density}" ]; then
+              rm -rf "$RES_DIR/mipmap-${density}"
+              cp -r "/tmp/mipmap_${density}" "$RES_DIR/mipmap-${density}"
+            fi
+          done
+          if [ -d "/tmp/drawable_backup" ]; then
+            rm -rf "$RES_DIR/drawable"
+            cp -r /tmp/drawable_backup "$RES_DIR/drawable"
+          fi
+          if [ -f "/tmp/styles_backup.xml" ]; then
+            cp /tmp/styles_backup.xml "$RES_DIR/values/styles.xml"
+          fi
+
+          if [ -f "/tmp/build_gradle_backup" ]; then
+            cp /tmp/build_gradle_backup "$GITHUB_WORKSPACE/android/app/build.gradle.kts"
+            rm -f "$GITHUB_WORKSPACE/android/app/build.gradle"
+          else
+            GRADLE="$GITHUB_WORKSPACE/android/app/build.gradle.kts"
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$GRADLE"
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/' "$GRADLE"
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' "$GRADLE"
+          fi
+
+          rm -rf "$GITHUB_WORKSPACE/lib"
+          cp -r /tmp/lib_backup "$GITHUB_WORKSPACE/lib"
+
+          if [ -d "/tmp/assets_backup" ]; then
+            rm -rf "$GITHUB_WORKSPACE/assets"
+            cp -r /tmp/assets_backup "$GITHUB_WORKSPACE/assets"
+          fi
+
+          cp /tmp/pubspec_backup.yaml "$GITHUB_WORKSPACE/pubspec.yaml"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Extract version from pubspec.yaml
+        id: version
+        run: |
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          VERSION_NAME=$(echo "$VERSION" | cut -d'+' -f1)
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version_name }}
+          name: ID Scan v${{ steps.version.outputs.version_name }}
+          body: |
+            ## ID Scan v${{ steps.version.outputs.version_name }}
+
+            Escáner de cédula colombiana — lee código de barras PDF417 y OCR.
+
+            ### Cómo instalar
+            1. Descarga el archivo APK
+            2. Activa "Instalar desde fuentes desconocidas" en tu celular
+            3. Instala el APK
+          files: build/app/outputs/flutter-apk/app-release.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
