@@ -27,6 +27,7 @@ jobs:
           cp pubspec.yaml /tmp/pubspec_backup.yaml
           cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest_backup.xml
           cp android/app/build.gradle.kts /tmp/build_gradle_backup 2>/dev/null || true
+          cp android/app/proguard-rules.pro /tmp/proguard_rules_backup 2>/dev/null || true
 
           cp -r android/app/src/main/res/mipmap-mdpi /tmp/mipmap_mdpi 2>/dev/null || true
           cp -r android/app/src/main/res/mipmap-hdpi /tmp/mipmap_hdpi 2>/dev/null || true
@@ -67,6 +68,10 @@ jobs:
             sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$GRADLE"
             sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/' "$GRADLE"
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/' "$GRADLE"
+          fi
+
+          if [ -f "/tmp/proguard_rules_backup" ]; then
+            cp /tmp/proguard_rules_backup "$GITHUB_WORKSPACE/android/app/proguard-rules.pro"
           fi
 
           rm -rf "$GITHUB_WORKSPACE/lib"
