@@ -5,13 +5,86 @@ import 'package:camera/camera.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:permission_handler/permission_handler.dart';
-// path_provider is used transitively via camera package
+
+// ============================================================================
+// LOG GLOBAL — Panel de debug visible
+// ============================================================================
+
+class AppLog {
+  static final List<String> _logs = [];
+  static final List<void Function()> _listeners = [];
+
+  static List<String> get logs => List.unmodifiable(_logs);
+
+  static void add(String message) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 23);
+    final entry = '[$timestamp] $message';
+    _logs.add(entry);
+    // Mantener solo los últimos 200 logs
+    if (_logs.length > 200) {
+      _logs.removeRange(0, _logs.length - 200);
+    }
+    // Notificar listeners
+    for (final listener in _listeners) {
+      listener();
+    }
+    // También imprimir en consola para debug
+    // ignore: avoid_print
+    print(entry);
+  }
+
+  static void addError(String message) {
+    add('ERROR: $message');
+  }
+
+  static void addSuccess(String message) {
+    add('OK: $message');
+  }
+
+  static void addInfo(String message) {
+    add('INFO: $message');
+  }
+
+  static void addBarcode(String message) {
+    add('BARCODE: $message');
+  }
+
+  static void addOcr(String message) {
+    add('OCR: $message');
+  }
+
+  static void addParser(String message) {
+    add('PARSER: $message');
+  }
+
+  static void addScan(String message) {
+    add('SCAN: $message');
+  }
+
+  static void addCamera(String message) {
+    add('CAM: $message');
+  }
+
+  static void clear() {
+    _logs.clear();
+    for (final listener in _listeners) {
+      listener();
+    }
+  }
+
+  static void addListener(void Function() listener) {
+    _listeners.add(listener);
+  }
+
+  static void removeListener(void Function() listener) {
+    _listeners.remove(listener);
+  }
+}
 
 // ============================================================================
 // MODELO DE DATOS
 // ============================================================================
 
-/// Representa los datos extraídos de una cédula colombiana.
 class CedulaData {
   String documentNumber = '';
   String firstName = '';
@@ -23,8 +96,6 @@ class CedulaData {
   String expeditionDate = '';
   String expeditionPlace = '';
   String bloodType = '';
-
-  /// Fuente de cada campo: 'barcode' o 'ocr'
   Map<String, String> fieldSource = {};
 
   String get fullName {
@@ -51,7 +122,6 @@ class CedulaData {
         'Tipo de sangre': bloodType.isNotEmpty ? bloodType : 'No detectado',
       };
 
-  /// Copia datos no vacíos de otra instancia, respetando la fuente.
   void mergeFrom(CedulaData other) {
     if (other.documentNumber.isNotEmpty && documentNumber.isEmpty) {
       documentNumber = other.documentNumber;
@@ -101,74 +171,67 @@ class CedulaData {
 // ============================================================================
 
 class IdScanParser {
-  /// Parsea el contenido del código PDF417 de la cédula colombiana.
-  ///
-  /// El PDF417 colombiano contiene campos separados por caracteres de control.
-  /// Existen varias generaciones del formato:
-  /// - Formato antiguo: campos separados por CR/LF
-  /// - Formato nuevo (dación 2015+): campos delimitados con @ o con posiciones fijas
-  /// - Formato con prefijo nacional: empieza con código de país
   static CedulaData parsePdf417(String raw) {
     final data = CedulaData();
     data.fieldSource = {};
 
-    if (raw.isEmpty) return data;
+    if (raw.isEmpty) {
+      AppLog.addParser('parsePdf417: raw vacío');
+      return data;
+    }
 
-    // Intentar múltiples estrategias de parsing
+    AppLog.addParser('parsePdf417: longitud=${raw.length}, primeros 100 chars="${raw.substring(0, raw.length > 100 ? 100 : raw.length)}"');
+    AppLog.addParser('parsePdf417: contiene @=${raw.contains("@")}, LF=${raw.contains("\n")}, CR=${raw.contains("\r")}');
+
     _parseFormatNew(data, raw);
     if (_isEmptyData(data)) {
+      AppLog.addParser('Formato nuevo no funcionó, intentando legacy...');
       _parseFormatLegacy(data, raw);
     }
     if (_isEmptyData(data)) {
+      AppLog.addParser('Legacy no funcionó, intentando fallback...');
       _parseFormatFallback(data, raw);
     }
 
+    AppLog.addParser('Resultado: doc=${data.documentNumber}, nombre=${data.firstName} ${data.firstLastName}, nac=${data.birthDate}');
     return data;
   }
 
-  /// Formato nuevo (cédulas 2015+): campos separados por @ o con estructura fija.
-  /// El payload típicamente empieza con un código de país o tiene campos
-  /// delimitados por caracteres especiales.
   static void _parseFormatNew(CedulaData data, String raw) {
-    // Limpiar caracteres de control
     final cleaned = raw
         .replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F]'), '')
         .trim();
 
-    // Intentar separar por @ (formato común en cédulas nuevas)
     if (cleaned.contains('@')) {
       final parts = cleaned.split('@').where((p) => p.isNotEmpty).toList();
+      AppLog.addParser('Formato @: ${parts.length} campos');
       _assignFieldsFromList(data, parts);
       return;
     }
 
-    // Intentar separar por CR/LF
     if (cleaned.contains('\n') || cleaned.contains('\r')) {
       final parts = cleaned
           .split(RegExp(r'[\r\n]+'))
           .where((p) => p.trim().isNotEmpty)
           .map((p) => p.trim())
           .toList();
+      AppLog.addParser('Formato CR/LF: ${parts.length} campos');
       _assignFieldsFromList(data, parts);
       return;
     }
 
-    // Intentar separar por pipes o tabs
     if (cleaned.contains('|') || cleaned.contains('\t')) {
       final parts = cleaned
           .split(RegExp(r'[|\t]+'))
           .where((p) => p.trim().isNotEmpty)
           .map((p) => p.trim())
           .toList();
+      AppLog.addParser('Formato pipe/tab: ${parts.length} campos');
       _assignFieldsFromList(data, parts);
     }
   }
 
-  /// Formato legacy (cédulas anteriores a 2015): campos en posiciones fijas o
-  /// separados por caracteres de control ANSI.
   static void _parseFormatLegacy(CedulaData data, String raw) {
-    // Algunas cédulas antiguas usan el formato:
-    // tipo_doc\nnumero\napellidos\nnombres\n...
     final lines = raw
         .split(RegExp(r'[\r\n\x00-\x1F]+'))
         .where((l) => l.trim().isNotEmpty)
@@ -176,7 +239,6 @@ class IdScanParser {
         .toList();
 
     if (lines.length >= 3) {
-      // Buscar el número de documento (primera secuencia numérica larga)
       for (final line in lines) {
         final numMatch = RegExp(r'(\d{6,12})').firstMatch(line);
         if (numMatch != null && data.documentNumber.isEmpty) {
@@ -185,44 +247,35 @@ class IdScanParser {
           break;
         }
       }
-
-      // Asignar nombres/apellidos de las líneas restantes
       _assignFieldsFromList(data, lines);
     }
   }
 
-  /// Fallback: buscar patrones específicos en el texto crudo.
   static void _parseFormatFallback(CedulaData data, String raw) {
-    // Buscar número de documento
     final docMatch = RegExp(r'(\d{8,12})').firstMatch(raw);
     if (docMatch != null) {
       data.documentNumber = docMatch.group(1)!;
       data.fieldSource['documentNumber'] = 'barcode';
     }
 
-    // Buscar fecha de nacimiento (DD/MM/YYYY)
-    final birthMatch =
-        RegExp(r'(\d{2}/\d{2}/\d{4})').firstMatch(raw);
+    final birthMatch = RegExp(r'(\d{2}/\d{2}/\d{4})').firstMatch(raw);
     if (birthMatch != null) {
       data.birthDate = birthMatch.group(1)!;
       data.fieldSource['birthDate'] = 'barcode';
     }
 
-    // Buscar género (M o F aislado)
     final genderMatch = RegExp(r'\b([MF])\b').firstMatch(raw);
     if (genderMatch != null) {
       data.gender = genderMatch.group(1)!;
       data.fieldSource['gender'] = 'barcode';
     }
 
-    // Buscar tipo de sangre
     final bloodMatch = RegExp(r'\b([ABO][+-])\b').firstMatch(raw);
     if (bloodMatch != null) {
       data.bloodType = bloodMatch.group(1)!;
       data.fieldSource['bloodType'] = 'barcode';
     }
 
-    // Buscar nombre: secuencia de palabras mayúsculas sin números
     final words = raw.split(RegExp(r'[^A-Za-zÁÉÍÓÚÑÜ]+')).where((w) => w.length > 2).toList();
     final nameWords = <String>[];
     for (final word in words) {
@@ -231,7 +284,6 @@ class IdScanParser {
       }
     }
     if (nameWords.isNotEmpty) {
-      // Intentar asignar: primeros son apellidos, últimos son nombres
       if (nameWords.length >= 4) {
         data.firstLastName = nameWords[0];
         data.secondLastName = nameWords[1];
@@ -250,26 +302,15 @@ class IdScanParser {
     }
   }
 
-  /// Asigna campos desde una lista de partes según el orden típico de la cédula.
   static void _assignFieldsFromList(CedulaData data, List<String> parts) {
     if (parts.isEmpty) return;
 
-    // Orden típico del PDF417 colombiano:
-    // [0] tipo/indicador, [1] número documento, [2] primer apellido,
-    // [3] segundo apellido, [4] primer nombre, [5] segundo nombre,
-    // [6] fecha nacimiento, [7] género, [8] fecha expedición,
-    // [9] lugar expedición, [10] RH/tipo sangre
-    //
-    // Pero el formato puede variar, así que intentamos heurística
-
     int offset = 0;
 
-    // Si el primer elemento es un código corto (tipo de documento), saltarlo
     if (parts.isNotEmpty && parts[0].length <= 3 && !RegExp(r'^\d{6,}').hasMatch(parts[0])) {
       offset = 1;
     }
 
-    // Número de documento: buscar la primera secuencia numérica larga
     if (data.documentNumber.isEmpty) {
       for (int i = offset; i < parts.length && i < offset + 2; i++) {
         final numMatch = RegExp(r'^(\d{6,12})$').firstMatch(parts[i]);
@@ -280,7 +321,6 @@ class IdScanParser {
           break;
         }
       }
-      // Si no se encontró con formato estricto, buscar en los primeros elementos
       if (data.documentNumber.isEmpty) {
         for (int i = 0; i < parts.length && i < 3; i++) {
           final numMatch = RegExp(r'(\d{6,12})').firstMatch(parts[i]);
@@ -294,25 +334,18 @@ class IdScanParser {
       }
     }
 
-    // Nombres y apellidos: buscar secuencias de texto mayúsculas
     final nameParts = <String>[];
     for (int i = offset; i < parts.length; i++) {
       final part = parts[i].trim();
-      // Si es una fecha, detenerse (los nombres vienen antes)
       if (RegExp(r'^\d{2}/\d{2}/\d{4}$').hasMatch(part)) break;
-      // Si es un número puro, saltar
       if (RegExp(r'^\d+$').hasMatch(part)) continue;
-      // Si es M o F, saltar
       if (part == 'M' || part == 'F') continue;
-      // Si es tipo de sangre, saltar
       if (RegExp(r'^[ABO][+-]$').hasMatch(part)) continue;
-      // Es un nombre/apellido
       if (part.length > 1 && RegExp(r'^[A-Za-zÁÉÍÓÚÑÜ]+$').hasMatch(part)) {
         nameParts.add(part.toUpperCase());
       }
     }
 
-    // Asignar nombres y apellidos
     if (nameParts.length >= 4) {
       data.firstLastName = nameParts[0];
       data.secondLastName = nameParts[1];
@@ -334,7 +367,6 @@ class IdScanParser {
       if (value.isNotEmpty) data.fieldSource[key] = 'barcode';
     }
 
-    // Buscar fechas (DD/MM/YYYY)
     final dates = <String>[];
     for (final part in parts) {
       final dateMatch = RegExp(r'(\d{2}/\d{2}/\d{4})').firstMatch(part);
@@ -351,7 +383,6 @@ class IdScanParser {
       data.fieldSource['expeditionDate'] = 'barcode';
     }
 
-    // Buscar género
     if (data.gender.isEmpty) {
       for (final part in parts) {
         if (part.trim() == 'M' || part.trim() == 'F') {
@@ -362,7 +393,6 @@ class IdScanParser {
       }
     }
 
-    // Buscar tipo de sangre
     if (data.bloodType.isEmpty) {
       for (final part in parts) {
         final bloodMatch = RegExp(r'^([ABO][+-])$').firstMatch(part.trim());
@@ -374,9 +404,7 @@ class IdScanParser {
       }
     }
 
-    // Buscar lugar de expedición: último campo alfabético después de las fechas
     if (data.expeditionPlace.isEmpty && nameParts.length > 2) {
-      // A veces el lugar de expedición viene al final
       for (int i = parts.length - 1; i >= 0; i--) {
         final part = parts[i].trim();
         if (part.length > 2 &&
@@ -390,7 +418,6 @@ class IdScanParser {
     }
   }
 
-  /// Obtiene el valor de un campo por nombre.
   static String _getFieldValue(CedulaData data, String fieldName) {
     switch (fieldName) {
       case 'firstLastName':
@@ -406,7 +433,6 @@ class IdScanParser {
     }
   }
 
-  /// Verifica si los datos extraídos están vacíos.
   static bool _isEmptyData(CedulaData data) {
     return data.documentNumber.isEmpty &&
         data.firstName.isEmpty &&
@@ -414,12 +440,17 @@ class IdScanParser {
         data.birthDate.isEmpty;
   }
 
-  /// Parsea texto OCR del frente de la cédula colombiana.
   static CedulaData parseOcrFront(String text) {
     final data = CedulaData();
     data.fieldSource = {};
 
-    if (text.isEmpty) return data;
+    if (text.isEmpty) {
+      AppLog.addOcr('parseOcrFront: texto vacío');
+      return data;
+    }
+
+    AppLog.addOcr('parseOcrFront: longitud=${text.length}');
+    AppLog.addOcr('Texto OCR primeros 200 chars: "${text.substring(0, text.length > 200 ? 200 : text.length)}"');
 
     final lines = text
         .split('\n')
@@ -427,7 +458,11 @@ class IdScanParser {
         .where((l) => l.isNotEmpty)
         .toList();
 
-    // Buscar número de cédula: secuencia numérica larga (8-12 dígitos)
+    AppLog.addOcr('Líneas OCR: ${lines.length}');
+    for (int i = 0; i < lines.length && i < 10; i++) {
+      AppLog.addOcr('  Línea $i: "${lines[i]}"');
+    }
+
     for (final line in lines) {
       final numMatch = RegExp(r'(\d{8,12})').firstMatch(line);
       if (numMatch != null) {
@@ -437,7 +472,6 @@ class IdScanParser {
       }
     }
 
-    // Buscar fecha de nacimiento
     for (final line in lines) {
       final dateMatch = RegExp(r'(\d{2}[./-]\d{2}[./-]\d{4})').firstMatch(line);
       if (dateMatch != null) {
@@ -447,10 +481,8 @@ class IdScanParser {
       }
     }
 
-    // Buscar nombres: líneas con texto mayúscula sin números
     final textLines = <String>[];
     for (final line in lines) {
-      // Filtrar líneas que parecen nombres (mayúsculas, sin números mayormente)
       final cleaned = line.replaceAll(RegExp(r'[^\w\sÁÉÍÓÚÑÜ]'), '').trim();
       if (cleaned.isNotEmpty &&
           cleaned.length > 2 &&
@@ -464,7 +496,6 @@ class IdScanParser {
       }
     }
 
-    // La primera línea suele ser apellidos, la segunda nombres
     if (textLines.length >= 2) {
       final lastNames = textLines[0].split(RegExp(r'\s+'));
       final names = textLines[1].split(RegExp(r'\s+'));
@@ -493,6 +524,7 @@ class IdScanParser {
       data.fieldSource['firstName'] = 'ocr';
     }
 
+    AppLog.addOcr('Resultado OCR: doc=${data.documentNumber}, nombre=${data.firstName} ${data.firstLastName}');
     return data;
   }
 }
@@ -511,6 +543,7 @@ class CameraService {
 
   Future<void> discoverCameras() async {
     _cameras = await availableCameras();
+    AppLog.addCamera('Cámaras encontradas: ${_cameras.length}');
   }
 
   Future<void> initializeController({int cameraIndex = 0}) async {
@@ -518,6 +551,8 @@ class CameraService {
     if (_cameras.isEmpty) throw Exception('No se encontró ninguna cámara en el dispositivo.');
 
     final camera = _cameras[cameraIndex < _cameras.length ? cameraIndex : 0];
+    AppLog.addCamera('Inicializando cámara: ${camera.name} (${camera.lensDirection})');
+
     _controller = CameraController(
       camera,
       ResolutionPreset.veryHigh,
@@ -526,13 +561,25 @@ class CameraService {
     );
 
     await _controller!.initialize();
+    AppLog.addCamera('Cámara inicializada OK');
+
+    // Configurar modo de enfoque para mejor captura de barcode
+    try {
+      await _controller!.setFocusMode(FocusMode.auto);
+      await _controller!.setFlashMode(FlashMode.off);
+      AppLog.addCamera('FocusMode.auto + FlashMode.off OK');
+    } catch (e) {
+      AppLog.addCamera('No se pudo configurar enfoque/flash: $e');
+    }
   }
 
   Future<String> takePicture() async {
     if (_controller == null || !_controller!.value.isInitialized) {
       throw Exception('La cámara no está inicializada.');
     }
+    AppLog.addCamera('Tomando foto...');
     final XFile file = await _controller!.takePicture();
+    AppLog.addCamera('Foto guardada: ${file.path}');
     return file.path;
   }
 
@@ -548,6 +595,7 @@ class CameraService {
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  AppLog.addInfo('App iniciada');
   runApp(const IdScanApp());
 }
 
@@ -599,6 +647,117 @@ class IdScanApp extends StatelessWidget {
 }
 
 // ============================================================================
+// WIDGET: PANEL DE LOGS DESLIZABLE
+// ============================================================================
+
+class LogPanel extends StatefulWidget {
+  const LogPanel({super.key});
+
+  @override
+  State<LogPanel> createState() => _LogPanelState();
+}
+
+class _LogPanelState extends State<LogPanel> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    AppLog.addListener(_onLogUpdate);
+  }
+
+  @override
+  void dispose() {
+    AppLog.removeListener(_onLogUpdate);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onLogUpdate() {
+    if (!mounted) return;
+    setState(() {});
+    // Auto-scroll al final
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final logs = AppLog.logs;
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 200),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1a1a1a),
+        border: Border.all(color: Colors.black54),
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            color: Colors.black,
+            child: Row(
+              children: [
+                const Icon(Icons.terminal, color: Colors.white70, size: 14),
+                const SizedBox(width: 6),
+                Text(
+                  'Logs (${logs.length})',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w600),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  onTap: AppLog.clear,
+                  child: const Icon(Icons.delete_outline, color: Colors.white54, size: 16),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.builder(
+              controller: _scrollController,
+              padding: const EdgeInsets.all(4),
+              itemCount: logs.length,
+              itemBuilder: (context, index) {
+                final log = logs[index];
+                Color textColor = Colors.white70;
+                if (log.contains('ERROR:')) {
+                  textColor = Colors.redAccent;
+                } else if (log.contains('OK:')) {
+                  textColor = Colors.greenAccent;
+                } else if (log.contains('BARCODE:')) {
+                  textColor = Colors.cyanAccent;
+                } else if (log.contains('OCR:')) {
+                  textColor = Colors.yellowAccent;
+                } else if (log.contains('PARSER:')) {
+                  textColor = Colors.orangeAccent;
+                } else if (log.contains('SCAN:')) {
+                  textColor = Colors.lightBlueAccent;
+                }
+                return Text(
+                  log,
+                  style: TextStyle(
+                    color: textColor,
+                    fontSize: 9,
+                    fontFamily: 'monospace',
+                    height: 1.3,
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================================
 // FEAT-1: PANTALLA PRINCIPAL CON PERMISOS
 // ============================================================================
 
@@ -612,6 +771,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   PermissionStatus _cameraStatus = PermissionStatus.denied;
   bool _isChecking = true;
+  bool _showLogs = false;
 
   @override
   void initState() {
@@ -626,6 +786,7 @@ class _HomePageState extends State<HomePage> {
       _cameraStatus = status;
       _isChecking = false;
     });
+    AppLog.addInfo('Permiso cámara: $status');
   }
 
   Future<void> _requestPermission() async {
@@ -635,6 +796,7 @@ class _HomePageState extends State<HomePage> {
       _cameraStatus = status;
       _isChecking = false;
     });
+    AppLog.addInfo('Permiso cámara solicitado: $status');
   }
 
   Future<void> _openSettings() async {
@@ -688,110 +850,98 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('ID Scan'),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: Icon(_showLogs ? Icons.terminal : Icons.terminal_outlined),
+            tooltip: 'Mostrar logs',
+            onPressed: () => setState(() => _showLogs = !_showLogs),
+          ),
+        ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Spacer(),
-            // Logo/Ícono
-            const Icon(
-              Icons.badge,
-              size: 80,
-              color: Colors.black,
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Escáner de Cédula',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-                color: Colors.black,
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Colombiana — PDF417 y OCR',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 16,
-                color: Colors.black54,
-              ),
-            ),
-            const SizedBox(height: 40),
-            // Estado del permiso
-            if (_isChecking)
-              const Center(child: CircularProgressIndicator(color: Colors.black))
-            else
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.black12),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    Icon(_statusIcon(), color: _cameraStatus == PermissionStatus.granted ? Colors.black : Colors.black54),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+      body: Column(
+        children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Spacer(),
+                  const Icon(Icons.badge, size: 80, color: Colors.black),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Escáner de Cédula',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.black),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Colombiana — PDF417 y OCR',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 40),
+                  if (_isChecking)
+                    const Center(child: CircularProgressIndicator(color: Colors.black))
+                  else
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.black12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
                         children: [
-                          const Text(
-                            'Permiso de cámara',
-                            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                          ),
-                          Text(
-                            _statusText(),
-                            style: const TextStyle(fontSize: 12, color: Colors.black54),
+                          Icon(_statusIcon(), color: _cameraStatus == PermissionStatus.granted ? Colors.black : Colors.black54),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Permiso de cámara', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                                Text(_statusText(), style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                              ],
+                            ),
                           ),
                         ],
                       ),
                     ),
-                  ],
-                ),
+                  const SizedBox(height: 16),
+                  if (!_isChecking && _cameraStatus != PermissionStatus.granted)
+                    ElevatedButton.icon(
+                      onPressed: _requestPermission,
+                      icon: const Icon(Icons.videocam),
+                      label: const Text('Solicitar permiso de cámara'),
+                    ),
+                  if (!_isChecking && _cameraStatus == PermissionStatus.permanentlyDenied)
+                    OutlinedButton.icon(
+                      onPressed: _openSettings,
+                      icon: const Icon(Icons.settings),
+                      label: const Text('Abrir configuración del sistema'),
+                    ),
+                  const SizedBox(height: 24),
+                  if (!_isChecking && _cameraStatus == PermissionStatus.granted)
+                    ElevatedButton.icon(
+                      onPressed: _openCamera,
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text('Abrir Cámara'),
+                      style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+                    ),
+                  const Spacer(),
+                ],
               ),
-            const SizedBox(height: 16),
-            // Botón solicitar permiso
-            if (!_isChecking && _cameraStatus != PermissionStatus.granted)
-              ElevatedButton.icon(
-                onPressed: _requestPermission,
-                icon: const Icon(Icons.videocam),
-                label: const Text('Solicitar permiso de cámara'),
-              ),
-            // Botón abrir configuración si denegado permanentemente
-            if (!_isChecking && _cameraStatus == PermissionStatus.permanentlyDenied)
-              OutlinedButton.icon(
-                onPressed: _openSettings,
-                icon: const Icon(Icons.settings),
-                label: const Text('Abrir configuración del sistema'),
-              ),
-            const SizedBox(height: 24),
-            // Botón abrir cámara
-            if (!_isChecking && _cameraStatus == PermissionStatus.granted)
-              ElevatedButton.icon(
-                onPressed: _openCamera,
-                icon: const Icon(Icons.camera_alt),
-                label: const Text('Abrir Cámara'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                ),
-              ),
-            const Spacer(),
-          ],
-        ),
+            ),
+          ),
+          if (_showLogs) const LogPanel(),
+        ],
       ),
     );
   }
 }
 
 // ============================================================================
-// FEAT-7: PANTALLA DE ESCANEO INTELIGENTE (modo automático)
-// FEAT-2: PREVIEW DE CÁMARA
-// FEAT-4: ESCANEO PDF417 EN TIEMPO REAL
+// FEAT-7 + FEAT-2 + FEAT-4: ESCANEO INTELIGENTE + PREVIEW + PDF417
 // ============================================================================
 
 class SmartScanPage extends StatefulWidget {
@@ -802,21 +952,34 @@ class SmartScanPage extends StatefulWidget {
 }
 
 class _SmartScanPageState extends State<SmartScanPage> {
-  final MobileScannerController _scannerController = MobileScannerController(
-    formats: [BarcodeFormat.pdf417],
-    detectionSpeed: DetectionSpeed.normal,
-    facing: CameraFacing.back,
-  );
+  // IMPORTANTE: No filtrar por formato — usar TODOS los formatos para que
+  // ML Kit detecte PDF417. Filtrar en el callback.
+  // Algunos dispositivos no detectan PDF417 si se filtra solo ese formato.
+  late final MobileScannerController _scannerController;
 
   bool _barcodeDetected = false;
   bool _isProcessing = false;
-  String _modeIndicator = 'Escaneando...';
+  String _modeIndicator = 'Escaneando PDF417...';
   bool _autoModeTimedOut = false;
   CedulaData? _barcodeData;
+  String _lastBarcodeRaw = '';
+  bool _showLogs = true;
+  bool _torchOn = false;
+  int _scanAttempts = 0;
+  double _zoomFactor = 1.0;
 
   @override
   void initState() {
     super.initState();
+    AppLog.addScan('SmartScanPage: iniciando scanner');
+
+    // Crear controller con todos los formatos (no filtrar)
+    // y detection speed normal para mejor compatibilidad
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.normal,
+      facing: CameraFacing.back,
+    );
+
     _startAutoModeTimeout();
   }
 
@@ -824,25 +987,78 @@ class _SmartScanPageState extends State<SmartScanPage> {
     Future.delayed(const Duration(seconds: 5), () {
       if (mounted && !_barcodeDetected && !_isProcessing) {
         setState(() => _autoModeTimedOut = true);
+        AppLog.addScan('Auto-timeout: mostrando botones manuales');
       }
     });
   }
 
   void _onBarcodeDetect(BarcodeCapture capture) {
-    if (_barcodeDetected || _isProcessing) return;
-
+    _scanAttempts++;
     final List<Barcode> barcodes = capture.barcodes;
+
     if (barcodes.isEmpty) return;
 
-    final Barcode barcode = barcodes.first;
-    final String? rawValue = barcode.rawValue;
-    if (rawValue == null || rawValue.isEmpty) return;
+    AppLog.addScan('Detección #$_scanAttempts: ${barcodes.length} barcode(s) encontrado(s)');
+
+    for (int i = 0; i < barcodes.length; i++) {
+      final barcode = barcodes[i];
+      final format = barcode.format;
+      final rawValue = barcode.rawValue;
+
+      AppLog.addBarcode('  Barcode[$i]: formato=$format, rawValue=${rawValue != null ? '"${rawValue.length > 80 ? '${rawValue.substring(0, 80)}...' : rawValue}"' : 'null'}');
+
+      // Filtrar: solo aceptar PDF417 o formatos que contengan datos útiles
+      // PDF417 = formato 2 en ML Kit
+      if (format == BarcodeFormat.pdf417) {
+        AppLog.addBarcode('  -> PDF417 detectado!');
+      } else {
+        AppLog.addBarcode('  -> Formato no PDF417 ($format), ignorando');
+      }
+    }
+
+    if (_barcodeDetected || _isProcessing) return;
+
+    // Buscar un PDF417 primero
+    Barcode? pdf417Barcode;
+    for (final barcode in barcodes) {
+      if (barcode.format == BarcodeFormat.pdf417) {
+        pdf417Barcode = barcode;
+        break;
+      }
+    }
+
+    // Si no hay PDF417, intentar con cualquier barcode que tenga datos largos
+    // (puede que el formato sea detectado como "unknown" en algunos dispositivos)
+    if (pdf417Barcode == null) {
+      for (final barcode in barcodes) {
+        final raw = barcode.rawValue;
+        if (raw != null && raw.length > 50) {
+          AppLog.addBarcode('  -> Usando barcode no-PDF417 con datos largos (${raw.length} chars)');
+          pdf417Barcode = barcode;
+          break;
+        }
+      }
+    }
+
+    if (pdf417Barcode == null) {
+      AppLog.addScan('Ningún barcode útil en esta detección');
+      return;
+    }
+
+    final String? rawValue = pdf417Barcode.rawValue;
+    if (rawValue == null || rawValue.isEmpty) {
+      AppLog.addScan('Barcode sin rawValue, ignorando');
+      return;
+    }
 
     setState(() {
       _barcodeDetected = true;
       _isProcessing = true;
-      _modeIndicator = 'Leyendo código de barras...';
+      _modeIndicator = 'PDF417 detectado! Procesando...';
+      _lastBarcodeRaw = rawValue;
     });
+
+    AppLog.addSuccess('PDF417 capturado! Longitud=${rawValue.length} caracteres');
 
     // Parsear el PDF417
     final data = IdScanParser.parsePdf417(rawValue);
@@ -862,7 +1078,7 @@ class _SmartScanPageState extends State<SmartScanPage> {
       MaterialPageRoute(
         builder: (_) => ResultPage(
           data: result,
-          barcodeRaw: '',
+          barcodeRaw: _lastBarcodeRaw,
         ),
       ),
     );
@@ -871,6 +1087,7 @@ class _SmartScanPageState extends State<SmartScanPage> {
   void _openCameraForPhoto() async {
     if (!mounted) return;
 
+    AppLog.addScan('Abriendo cámara para foto...');
     final result = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const CameraPage()),
     );
@@ -885,6 +1102,27 @@ class _SmartScanPageState extends State<SmartScanPage> {
     }
   }
 
+  void _toggleTorch() {
+    _torchOn = !_torchOn;
+    _scannerController.toggleTorch();
+    AppLog.addScan('Flash: ${_torchOn ? "ON" : "OFF"}');
+    setState(() {});
+  }
+
+  void _zoomIn() {
+    _zoomFactor = (_zoomFactor + 0.5).clamp(1.0, 5.0);
+    _scannerController.setZoomScale(_zoomFactor);
+    AppLog.addScan('Zoom: ${_zoomFactor}x');
+    setState(() {});
+  }
+
+  void _zoomOut() {
+    _zoomFactor = (_zoomFactor - 0.5).clamp(1.0, 5.0);
+    _scannerController.setZoomScale(_zoomFactor);
+    AppLog.addScan('Zoom: ${_zoomFactor}x');
+    setState(() {});
+  }
+
   @override
   void dispose() {
     _scannerController.dispose();
@@ -893,6 +1131,8 @@ class _SmartScanPageState extends State<SmartScanPage> {
 
   @override
   Widget build(BuildContext context) {
+    final topPad = MediaQuery.of(context).padding.top;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -906,39 +1146,106 @@ class _SmartScanPageState extends State<SmartScanPage> {
           // Overlay con guía rectangular
           _buildScannerOverlay(),
 
-          // Indicador de modo
+          // Barra superior con indicador de modo
           Positioned(
-            top: MediaQuery.of(context).padding.top + 16,
+            top: topPad + 8,
             left: 0,
             right: 0,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               color: Colors.black54,
-              child: Text(
-                _modeIndicator,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
+              child: Row(
+                children: [
+                  // Botón cerrar
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: const Icon(Icons.close, color: Colors.white, size: 24),
+                  ),
+                  const SizedBox(width: 12),
+                  // Indicador de modo
+                  Expanded(
+                    child: Text(
+                      _modeIndicator,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: _barcodeDetected ? Colors.greenAccent : Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  // Botón logs
+                  GestureDetector(
+                    onTap: () => setState(() => _showLogs = !_showLogs),
+                    child: Icon(
+                      _showLogs ? Icons.terminal : Icons.terminal_outlined,
+                      color: Colors.white70,
+                      size: 20,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
 
-          // Botón cancelar
+          // Controles de zoom y flash
           Positioned(
-            top: MediaQuery.of(context).padding.top + 56,
-            left: 16,
-            child: TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              style: TextButton.styleFrom(
-                backgroundColor: Colors.black54,
-                shape: const CircleBorder(),
-              ),
-              child: const Icon(Icons.close, color: Colors.white),
+            top: topPad + 52,
+            right: 12,
+            child: Column(
+              children: [
+                // Flash
+                GestureDetector(
+                  onTap: _toggleTorch,
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _torchOn ? Colors.white : Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      _torchOn ? Icons.flash_on : Icons.flash_off,
+                      color: _torchOn ? Colors.black : Colors.white,
+                      size: 20,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // Zoom +
+                GestureDetector(
+                  onTap: _zoomIn,
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                    child: const Icon(Icons.add, color: Colors.white, size: 20),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                // Zoom indicator
+                Text('${_zoomFactor}x', style: const TextStyle(color: Colors.white70, fontSize: 10)),
+                const SizedBox(height: 4),
+                // Zoom -
+                GestureDetector(
+                  onTap: _zoomOut,
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                    child: const Icon(Icons.remove, color: Colors.white, size: 20),
+                  ),
+                ),
+              ],
             ),
           ),
+
+          // Panel de logs (si está visible)
+          if (_showLogs)
+            Positioned(
+              top: topPad + 52,
+              left: 12,
+              right: 56,
+              child: const LogPanel(),
+            ),
 
           // Botones inferiores
           Positioned(
@@ -968,7 +1275,6 @@ class _SmartScanPageState extends State<SmartScanPage> {
                         child: ElevatedButton.icon(
                           onPressed: () {
                             setState(() => _modeIndicator = 'Leyendo código de barras...');
-                            // El scanner ya está activo para PDF417
                           },
                           icon: const Icon(Icons.qr_code_2),
                           label: const Text('Es la parte trasera'),
@@ -1002,18 +1308,28 @@ class _SmartScanPageState extends State<SmartScanPage> {
                     decoration: BoxDecoration(
                       color: Colors.black87,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.white24),
+                      border: Border.all(color: Colors.greenAccent),
                     ),
                     child: const Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.check_circle, color: Colors.white, size: 20),
+                        Icon(Icons.check_circle, color: Colors.greenAccent, size: 20),
                         SizedBox(width: 8),
                         Text(
-                          'Código PDF417 detectado',
-                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                          'Código PDF417 detectado!',
+                          style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.w600),
                         ),
                       ],
+                    ),
+                  ),
+
+                // Intento counter
+                if (!_barcodeDetected && _scanAttempts > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      'Intentos: $_scanAttempts',
+                      style: const TextStyle(color: Colors.white54, fontSize: 11),
                     ),
                   ),
               ],
@@ -1025,78 +1341,78 @@ class _SmartScanPageState extends State<SmartScanPage> {
   }
 
   Widget _buildScannerOverlay() {
-    return ColorFiltered(
-      colorFilter: const ColorFilter.mode(
-        Colors.transparent,
-        BlendMode.srcOver,
-      ),
-      child: Stack(
-        children: [
-          // Sombra superior
-          Align(
-            alignment: Alignment.topCenter,
-            child: Container(
-              height: MediaQuery.of(context).size.height * 0.2,
-              color: Colors.black54,
-            ),
-          ),
-          // Sombra inferior
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Container(
-              height: MediaQuery.of(context).size.height * 0.25,
-              color: Colors.black54,
-            ),
-          ),
-          // Sombra izquierda
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Container(
-              width: MediaQuery.of(context).size.width * 0.1,
-              height: MediaQuery.of(context).size.height * 0.55,
-              color: Colors.black54,
-            ),
-          ),
-          // Sombra derecha
-          Align(
-            alignment: Alignment.centerRight,
-            child: Container(
-              width: MediaQuery.of(context).size.width * 0.1,
-              height: MediaQuery.of(context).size.height * 0.55,
-              color: Colors.black54,
-            ),
-          ),
-          // Marco guía
-          Center(
-            child: Container(
-              width: MediaQuery.of(context).size.width * 0.8,
-              height: MediaQuery.of(context).size.height * 0.55,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white, width: 2),
-                borderRadius: BorderRadius.circular(12),
+    final h = MediaQuery.of(context).size.height;
+    final w = MediaQuery.of(context).size.width;
+
+    // Rectángulo de guía: más ancho para la cédula horizontal
+    final guideW = w * 0.9;
+    final guideH = h * 0.35;
+    final guideLeft = (w - guideW) / 2;
+    final guideTop = (h - guideH) / 2 - 20;
+
+    return Stack(
+      children: [
+        // Sombra completa
+        Container(color: Colors.black45),
+        // Área clara (cutout)
+        Positioned(
+          left: guideLeft,
+          top: guideTop,
+          child: Container(
+            width: guideW,
+            height: guideH,
+            decoration: BoxDecoration(
+              color: Colors.transparent,
+              border: Border.all(
+                color: _barcodeDetected ? Colors.greenAccent : Colors.white,
+                width: 2,
               ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.badge,
-                    color: Colors.white54,
-                    size: 48,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _barcodeDetected ? 'Código detectado' : 'Centra la cédula aquí',
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 14,
-                    ),
-                  ),
-                ],
-              ),
+              borderRadius: BorderRadius.circular(12),
             ),
           ),
-        ],
-      ),
+        ),
+        // BlendMode para hacer el cutout
+        Positioned(
+          left: guideLeft + 2,
+          top: guideTop + 2,
+          child: Container(
+            width: guideW - 4,
+            height: guideH - 4,
+            color: Colors.transparent,
+          ),
+        ),
+        // Texto guía
+        Positioned(
+          left: 0,
+          right: 0,
+          top: guideTop + guideH / 2 - 30,
+          child: Column(
+            children: [
+              Icon(
+                _barcodeDetected ? Icons.check_circle : Icons.crop_free,
+                color: _barcodeDetected ? Colors.greenAccent : Colors.white54,
+                size: 36,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _barcodeDetected ? 'Código detectado!' : 'Apunta al código PDF417',
+                style: TextStyle(
+                  color: _barcodeDetected ? Colors.greenAccent : Colors.white54,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                'Parte trasera de la cédula',
+                style: TextStyle(
+                  color: _barcodeDetected ? Colors.greenAccent : Colors.white38,
+                  fontSize: 11,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1135,6 +1451,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         });
       }
     } catch (e) {
+      AppLog.addError('CameraPage init error: $e');
       if (mounted) {
         setState(() {
           _isInitializing = false;
@@ -1163,6 +1480,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         Navigator.of(context).pop(path);
       }
     } catch (e) {
+      AppLog.addError('Error al tomar foto: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error al tomar foto: $e')),
@@ -1185,11 +1503,8 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Camera preview
           if (_isInitializing)
-            const Center(
-              child: CircularProgressIndicator(color: Colors.white),
-            )
+            const Center(child: CircularProgressIndicator(color: Colors.white))
           else if (_errorMessage != null)
             Center(
               child: Padding(
@@ -1199,27 +1514,34 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                   children: [
                     const Icon(Icons.error_outline, color: Colors.white, size: 48),
                     const SizedBox(height: 16),
-                    Text(
-                      _errorMessage!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white, fontSize: 16),
-                    ),
+                    Text(_errorMessage!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 16)),
                     const SizedBox(height: 24),
-                    ElevatedButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Volver'),
-                    ),
+                    ElevatedButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Volver')),
                   ],
                 ),
               ),
             )
           else ...[
-            // Preview
             CameraPreview(_cameraService.controller!),
-
-            // Overlay guía
-            _buildCameraOverlay(),
-
+            // Guía
+            Center(
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.9,
+                height: MediaQuery.of(context).size.height * 0.35,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.white, width: 2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.badge, color: Colors.white54, size: 36),
+                    SizedBox(height: 4),
+                    Text('Centra la cédula aquí', style: TextStyle(color: Colors.white54, fontSize: 13)),
+                  ],
+                ),
+              ),
+            ),
             // Controles
             Positioned(
               bottom: MediaQuery.of(context).padding.bottom + 24,
@@ -1228,21 +1550,14 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  // Botón cancelar
                   TextButton(
                     onPressed: () => Navigator.of(context).pop(),
                     style: TextButton.styleFrom(
                       backgroundColor: Colors.black54,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                     ),
-                    child: const Text(
-                      'Cancelar',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
-                    ),
+                    child: const Text('Cancelar', style: TextStyle(color: Colors.white, fontSize: 16)),
                   ),
-                  // Botón tomar foto
                   Container(
                     width: 72,
                     height: 72,
@@ -1255,7 +1570,6 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                       icon: const Icon(Icons.camera, color: Colors.white, size: 32),
                     ),
                   ),
-                  // Espacio vacío para balancear
                   const SizedBox(width: 80),
                 ],
               ),
@@ -1265,35 +1579,10 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
       ),
     );
   }
-
-  Widget _buildCameraOverlay() {
-    return Center(
-      child: Container(
-        width: MediaQuery.of(context).size.width * 0.85,
-        height: MediaQuery.of(context).size.height * 0.5,
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.white, width: 2),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: const Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.badge, color: Colors.white54, size: 48),
-            SizedBox(height: 8),
-            Text(
-              'Centra la cédula aquí',
-              style: TextStyle(color: Colors.white54, fontSize: 14),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 // ============================================================================
-// FEAT-3: PANTALLA DE REVISIÓN DE FOTO
-// FEAT-4 & FEAT-5: PROCESAMIENTO DE BARCODE Y OCR
+// FEAT-3 + FEAT-4 + FEAT-5: REVISIÓN + BARCODE + OCR
 // ============================================================================
 
 class ReviewPage extends StatefulWidget {
@@ -1308,6 +1597,7 @@ class ReviewPage extends StatefulWidget {
 class _ReviewPageState extends State<ReviewPage> {
   bool _isProcessing = false;
   String? _errorMessage;
+  bool _showLogs = true;
 
   @override
   Widget build(BuildContext context) {
@@ -1315,80 +1605,110 @@ class _ReviewPageState extends State<ReviewPage> {
       appBar: AppBar(
         title: const Text('Revisar Foto'),
         centerTitle: true,
-      ),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          // Imagen capturada
-          Image.file(
-            File(widget.imagePath),
-            fit: BoxFit.contain,
+        actions: [
+          IconButton(
+            icon: Icon(_showLogs ? Icons.terminal : Icons.terminal_outlined),
+            tooltip: 'Mostrar logs',
+            onPressed: () => setState(() => _showLogs = !_showLogs),
           ),
-
-          // Indicador de carga
-          if (_isProcessing)
-            Container(
-              color: Colors.white70,
-              child: const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(color: Colors.black),
-                    SizedBox(height: 16),
-                    Text(
-                      'Procesando imagen...',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-          // Error
-          if (_errorMessage != null && !_isProcessing)
-            Container(
-              color: Colors.white70,
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.error_outline, size: 48),
-                    const SizedBox(height: 16),
-                    Text(
-                      _errorMessage!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 14),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-
-          // Botones
-          Positioned(
-            bottom: MediaQuery.of(context).padding.bottom + 24,
-            left: 16,
-            right: 16,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
               children: [
-                ElevatedButton.icon(
-                  onPressed: _isProcessing ? null : _scanImage,
-                  icon: const Icon(Icons.search),
-                  label: const Text('Escanear esta foto'),
+                // Imagen capturada
+                Image.file(
+                  File(widget.imagePath),
+                  fit: BoxFit.contain,
                 ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: _isProcessing
-                      ? null
-                      : () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Volver a tomar'),
-                ),
+
+                // Indicador de carga
+                if (_isProcessing)
+                  Container(
+                    color: Colors.white70,
+                    child: const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(color: Colors.black),
+                          SizedBox(height: 16),
+                          Text('Procesando imagen...', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                // Error
+                if (_errorMessage != null && !_isProcessing)
+                  Container(
+                    color: Colors.white70,
+                    padding: const EdgeInsets.all(24),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.error_outline, size: 48),
+                          const SizedBox(height: 16),
+                          Text(_errorMessage!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 14)),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                // Botones
+                if (!_isProcessing && _errorMessage == null)
+                  Positioned(
+                    bottom: 16,
+                    left: 16,
+                    right: 16,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _scanImage,
+                          icon: const Icon(Icons.search),
+                          label: const Text('Escanear esta foto'),
+                        ),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: () => Navigator.of(context).pop(),
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Volver a tomar'),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                // Botón de re-escaneo si hay error
+                if (_errorMessage != null && !_isProcessing)
+                  Positioned(
+                    bottom: 16,
+                    left: 16,
+                    right: 16,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: _scanImage,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Intentar de nuevo'),
+                        ),
+                        const SizedBox(height: 12),
+                        OutlinedButton.icon(
+                          onPressed: () => Navigator.of(context).pop(),
+                          icon: const Icon(Icons.camera_alt),
+                          label: const Text('Volver a tomar'),
+                        ),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
+          if (_showLogs) const LogPanel(),
         ],
       ),
     );
@@ -1400,49 +1720,89 @@ class _ReviewPageState extends State<ReviewPage> {
       _errorMessage = null;
     });
 
+    AppLog.addScan('ReviewPage: iniciando escaneo de imagen');
+    AppLog.addScan('Imagen: ${widget.imagePath}');
+
     try {
       CedulaData barcodeData = CedulaData();
       CedulaData ocrData = CedulaData();
       String barcodeRaw = '';
 
-      // Intentar escaneo de código de barras desde la imagen
+      // ====================================================================
+      // PASO 1: Intentar escaneo de código de barras desde la imagen
+      // ====================================================================
+      AppLog.addBarcode('Iniciando escaneo de barcode desde imagen...');
+
       try {
         final controller = MobileScannerController(
-          formats: [BarcodeFormat.pdf417],
           detectionSpeed: DetectionSpeed.normal,
         );
 
+        AppLog.addBarcode('MobileScannerController creado, llamando analyzeImage...');
+
         final capture = await controller.analyzeImage(widget.imagePath);
+
         controller.dispose();
 
-        if (capture != null && capture.barcodes.isNotEmpty) {
-          final rawValue = capture.barcodes.first.rawValue;
-          if (rawValue != null && rawValue.isNotEmpty) {
-            barcodeRaw = rawValue;
-            barcodeData = IdScanParser.parsePdf417(rawValue);
+        if (capture != null) {
+          AppLog.addBarcode('analyzeImage OK: ${capture.barcodes.length} barcode(s) encontrado(s)');
+
+          for (int i = 0; i < capture.barcodes.length; i++) {
+            final bc = capture.barcodes[i];
+            final rawVal = bc.rawValue;
+            AppLog.addBarcode('  Barcode[$i]: formato=${bc.format}, raw=${rawVal != null ? '"${rawVal.length > 80 ? '${rawVal.substring(0, 80)}...' : rawVal}"' : 'null'}');
+
+            // Buscar PDF417 primero
+            if (bc.format == BarcodeFormat.pdf417 && bc.rawValue != null) {
+              barcodeRaw = bc.rawValue!;
+              AppLog.addSuccess('PDF417 encontrado en imagen!');
+              break;
+            }
+
+            // Si no es PDF417 pero tiene datos largos, usarlo
+            if (barcodeRaw.isEmpty && rawVal != null && rawVal.length > 50) {
+              barcodeRaw = rawVal;
+              AppLog.addBarcode('Usando barcode no-PDF417 con ${rawVal.length} chars');
+            }
           }
+
+          if (barcodeRaw.isNotEmpty) {
+            barcodeData = IdScanParser.parsePdf417(barcodeRaw);
+          } else {
+            AppLog.addBarcode('No se encontró barcode útil en la imagen');
+          }
+        } else {
+          AppLog.addBarcode('analyzeImage retornó null — no se detectó ningún barcode');
         }
       } catch (e) {
-        // Barcode scan failed, continue with OCR only
-        debugPrint('Barcode scan from image failed: $e');
+        AppLog.addError('Error en barcode scan: $e');
       }
 
-      // OCR de la imagen
+      // ====================================================================
+      // PASO 2: OCR de la imagen
+      // ====================================================================
+      AppLog.addOcr('Iniciando OCR de la imagen...');
+
       try {
         final inputImage = InputImage.fromFilePath(widget.imagePath);
         final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
         final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
         textRecognizer.close();
 
+        AppLog.addOcr('OCR completado: ${recognizedText.text.length} caracteres');
         ocrData = IdScanParser.parseOcrFront(recognizedText.text);
       } catch (e) {
-        debugPrint('OCR failed: $e');
+        AppLog.addError('Error en OCR: $e');
       }
 
-      // Combinar datos: barcode tiene prioridad, OCR complementa
+      // ====================================================================
+      // PASO 3: Combinar datos
+      // ====================================================================
       final mergedData = CedulaData();
       mergedData.mergeFrom(barcodeData);
       mergedData.mergeFrom(ocrData);
+
+      AppLog.addInfo('Datos combinados: doc=${mergedData.documentNumber}, nombre=${mergedData.fullName}');
 
       // Verificar si obtuvimos algún dato
       if (mergedData.documentNumber.isEmpty &&
@@ -1451,7 +1811,7 @@ class _ReviewPageState extends State<ReviewPage> {
         setState(() {
           _isProcessing = false;
           _errorMessage =
-              'No se detectó código de barras ni texto legible. Intenta con mejor iluminación o acerca más la cámara.';
+              'No se detectó código de barras ni texto legible.\n\nConsejos:\n- Mejor iluminación\n- Acercar más la cámara\n- Evitar reflejos\n- La parte trasera tiene el código PDF417';
         });
         return;
       }
@@ -1466,6 +1826,7 @@ class _ReviewPageState extends State<ReviewPage> {
         ),
       );
     } catch (e) {
+      AppLog.addError('Error general en escaneo: $e');
       if (mounted) {
         setState(() {
           _isProcessing = false;
@@ -1500,7 +1861,6 @@ class ResultPage extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Header
             const Icon(Icons.badge, size: 48, color: Colors.black),
             const SizedBox(height: 8),
             const Text(
@@ -1526,7 +1886,6 @@ class ResultPage extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    // Ícono de fuente
                     if (isBarcode)
                       const Padding(
                         padding: EdgeInsets.only(right: 8),
@@ -1539,19 +1898,13 @@ class ResultPage extends StatelessWidget {
                       )
                     else
                       const SizedBox.shrink(),
-                    // Etiqueta
                     Expanded(
                       flex: 2,
                       child: Text(
                         entry.key,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: Colors.black54,
-                          fontWeight: FontWeight.w500,
-                        ),
+                        style: const TextStyle(fontSize: 13, color: Colors.black54, fontWeight: FontWeight.w500),
                       ),
                     ),
-                    // Valor
                     Expanded(
                       flex: 3,
                       child: Text(
@@ -1569,17 +1922,41 @@ class ResultPage extends StatelessWidget {
               );
             }),
 
+            // Raw barcode data (colapsable)
+            if (barcodeRaw.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              ExpansionTile(
+                tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+                childrenPadding: const EdgeInsets.all(12),
+                collapsedBackgroundColor: Colors.black.withValues(alpha: 0.05),
+                backgroundColor: Colors.black.withValues(alpha: 0.08),
+                title: const Text(
+                  'Datos raw del código de barras',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                children: [
+                  Container(
+                    constraints: const BoxConstraints(maxHeight: 150),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        barcodeRaw.length > 2000 ? '${barcodeRaw.substring(0, 2000)}...' : barcodeRaw,
+                        style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+
             const SizedBox(height: 24),
 
-            // Botón copiar todo
+            // Botones
             ElevatedButton.icon(
               onPressed: () => _copyAll(context),
               icon: const Icon(Icons.copy),
               label: const Text('Copiar todo'),
             ),
             const SizedBox(height: 12),
-
-            // Botón escanear otra cédula
             OutlinedButton.icon(
               onPressed: () {
                 Navigator.of(context).pushAndRemoveUntil(
@@ -1591,8 +1968,6 @@ class ResultPage extends StatelessWidget {
               label: const Text('Escanear otra cédula'),
             ),
             const SizedBox(height: 12),
-
-            // Botón nueva foto
             OutlinedButton.icon(
               onPressed: () async {
                 final result = await Navigator.of(context).push<String>(
@@ -1642,10 +2017,7 @@ class ResultPage extends StatelessWidget {
     }
     Clipboard.setData(ClipboardData(text: buffer.toString()));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Datos copiados al portapapeles'),
-        duration: Duration(seconds: 2),
-      ),
+      const SnackBar(content: Text('Datos copiados al portapapeles'), duration: Duration(seconds: 2)),
     );
   }
 }
