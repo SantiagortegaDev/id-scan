@@ -981,20 +981,7 @@ class _SmartScanPageState extends State<SmartScanPage> {
       facing: CameraFacing.back,
     );
 
-    // Escuchar errores del scanner
-    _scannerController.error.addListener(_onScannerError);
-
     _startAutoModeTimeout();
-  }
-
-  void _onScannerError() {
-    final error = _scannerController.error.value;
-    if (error != null) {
-      AppLog.addError('Scanner error: $error');
-      setState(() {
-        _modeIndicator = 'Error: ${error.toString().substring(0, error.toString().length > 60 ? 60 : error.toString().length)}';
-      });
-    }
   }
 
   void _startAutoModeTimeout() {
@@ -1139,7 +1126,6 @@ class _SmartScanPageState extends State<SmartScanPage> {
 
   @override
   void dispose() {
-    _scannerController.error.removeListener(_onScannerError);
     _scannerController.dispose();
     super.dispose();
   }
