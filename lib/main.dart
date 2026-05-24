@@ -972,6 +972,7 @@ class _SmartScanPageState extends State<SmartScanPage> {
   void initState() {
     super.initState();
     AppLog.addScan('SmartScanPage: iniciando scanner');
+    AppLog.addInfo('isMinifyEnabled=false en build.gradle — R8 no debería romper ML Kit');
 
     // Crear controller con todos los formatos (no filtrar)
     // y detection speed normal para mejor compatibilidad
@@ -980,7 +981,20 @@ class _SmartScanPageState extends State<SmartScanPage> {
       facing: CameraFacing.back,
     );
 
+    // Escuchar errores del scanner
+    _scannerController.error.addListener(_onScannerError);
+
     _startAutoModeTimeout();
+  }
+
+  void _onScannerError() {
+    final error = _scannerController.error.value;
+    if (error != null) {
+      AppLog.addError('Scanner error: $error');
+      setState(() {
+        _modeIndicator = 'Error: ${error.toString().substring(0, error.toString().length > 60 ? 60 : error.toString().length)}';
+      });
+    }
   }
 
   void _startAutoModeTimeout() {
@@ -1125,6 +1139,7 @@ class _SmartScanPageState extends State<SmartScanPage> {
 
   @override
   void dispose() {
+    _scannerController.error.removeListener(_onScannerError);
     _scannerController.dispose();
     super.dispose();
   }
@@ -1141,6 +1156,34 @@ class _SmartScanPageState extends State<SmartScanPage> {
           MobileScanner(
             controller: _scannerController,
             onDetect: _onBarcodeDetect,
+            errorBuilder: (context, error, child) {
+              AppLog.addError('MobileScanner errorBuilder: $error');
+              return Container(
+                color: Colors.black,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Error del escáner:\n$error',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('Volver'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
 
           // Overlay con guía rectangular
@@ -1738,9 +1781,14 @@ class _ReviewPageState extends State<ReviewPage> {
           detectionSpeed: DetectionSpeed.normal,
         );
 
-        AppLog.addBarcode('MobileScannerController creado, llamando analyzeImage...');
+        AppLog.addBarcode('MobileScannerController creado para analyzeImage');
+        AppLog.addBarcode('Imagen path: ${widget.imagePath}');
+        AppLog.addBarcode('Imagen existe: ${File(widget.imagePath).existsSync()}');
+        AppLog.addBarcode('Imagen tamaño: ${File(widget.imagePath).lengthSync()} bytes');
 
         final capture = await controller.analyzeImage(widget.imagePath);
+
+        AppLog.addBarcode('analyzeImage retornó: ${capture != null ? "capture con ${capture.barcodes.length} barcode(s)" : "null"}');
 
         controller.dispose();
 

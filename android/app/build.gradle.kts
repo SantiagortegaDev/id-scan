@@ -31,10 +31,11 @@ android {
         release {
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            // CRITICAL: Disable R8 minification to prevent ML Kit class stripping.
+            // ML Kit loads classes via reflection that R8 removes as "unused".
+            // This fixes NullPointerException in barcode scanning and OCR.
+            isMinifyEnabled = false
+            shrinkResources = false
         }
     }
 }
