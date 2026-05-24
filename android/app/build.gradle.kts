@@ -22,9 +22,8 @@ android {
         versionName = flutter.versionName
     }
 
-    aaptOptions {
-        noCompress("tflite")
-        noCompress("lite")
+    androidResources {
+        noCompress += listOf("tflite", "lite")
     }
 
     buildTypes {
@@ -35,7 +34,7 @@ android {
             // ML Kit loads classes via reflection that R8 removes as "unused".
             // This fixes NullPointerException in barcode scanning and OCR.
             isMinifyEnabled = false
-            shrinkResources = false
+            isShrinkResources = false
         }
     }
 }
