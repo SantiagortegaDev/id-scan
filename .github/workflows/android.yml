@@ -114,7 +114,7 @@ jobs:
           body: |
             ## ID Scan v${{ steps.version.outputs.version_name }}
 
-            Escáner de cédula colombiana — lee código de barras PDF417 y OCR.
+            Escáner de cédula colombiana — lee código de barras PDF417 de la parte trasera.
 
             ### Cómo instalar
             1. Descarga el archivo APK
