@@ -70,6 +70,19 @@ class CedulaData {
 // ============================================================================
 
 class OcrParser {
+  // Palabras que NO son nombres — etiquetas y texto institucional de la cédula
+  static const _skipWords = [
+    'REPÚBLICA', 'REPUBLICA', 'COLOMBIA', 'CÉDULA', 'CEDULA',
+    'CIUDADANÍA', 'CIUDADANIA', 'IDENTIFICACIÓN', 'IDENTIFICACION',
+    'PERSONAL', 'MINISTERIO', 'REGISTRO', 'NACIONAL', 'DEL', 'DE', 'LA',
+    'FECHA', 'NACIMIENTO', 'LUGAR', 'EXPEDICIÓN', 'EXPEDICION',
+    'SEXO', 'GRUPO', 'SANGRE', 'RH', 'ESTATURA', 'HUELLA',
+    'DIGITAL', 'DACTILAR', 'FIRMA', 'NUMERO', 'NÚMERO',
+    'TARJETA', 'IDENTIDAD', 'APELLIDOS', 'APELLIDO', 'NOMBRES', 'NOMBRE',
+    'VARON', 'HOMBRE', 'MUJER', 'FEMENINO', 'MASCULINO',
+    'ORIGEN', 'DIRECCIÓN', 'DIRECCION',
+  ];
+
   static CedulaData parseFront(String text) {
     final data = CedulaData();
     data.rawText = text;
@@ -77,7 +90,7 @@ class OcrParser {
     if (text.isEmpty) return data;
 
     AppLog.addOcr('parseFront: longitud=${text.length}');
-    AppLog.addOcr('Texto: "${text.substring(0, text.length > 150 ? 150 : text.length)}"');
+    AppLog.addOcr('Texto: "${text.substring(0, text.length > 200 ? 200 : text.length)}"');
 
     final lines = text
         .split('\n')
@@ -86,31 +99,38 @@ class OcrParser {
         .toList();
 
     AppLog.addOcr('Líneas: ${lines.length}');
+    for (int i = 0; i < lines.length; i++) {
+      AppLog.addOcr('  [$i] "${lines[i]}"');
+    }
 
-    // 1. Buscar número de documento
-    // La cédula colombiana tiene entre 8 y 11 dígitos
-    // Puede venir con puntos, comas o espacios: "1.234.567.890" o "1,234,567,890"
+    // ========================================================================
+    // 1. BUSCAR NÚMERO DE DOCUMENTO
+    // ========================================================================
+    // La cédula colombiana tiene entre 8 y 11 dígitos.
+    // Puede venir con puntos/comas/espacios: "1.097.788.936" o "1 097 788 936"
+    // El regex anterior solo capturaba 2 separadores → perdía dígitos.
+    // Nuevo regex: (\d{1,3}(?:[.,\s]\d{3})+) captura N grupos de separadores.
     String? docNumber;
     for (final line in lines) {
-      // Buscar patrón de número con separadores: "1.234.567.890" o "1 234 567 890"
-      final dottedMatch = RegExp(r'(\d{1,3}[.,\s]\d{3}[.,\s]\d{3,})').firstMatch(line);
+      // Patrón con separadores: "1.097.788.936" o "1,097,788,936" o "1 097 788 936"
+      final dottedMatch = RegExp(r'(\d{1,3}(?:[.,\s]\d{3})+)').firstMatch(line);
       if (dottedMatch != null) {
         final raw = dottedMatch.group(1)!;
         final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
         if (digits.length >= 6 && digits.length <= 15) {
           docNumber = digits;
-          AppLog.addOcr('Documento encontrado (con puntos): $raw -> $docNumber');
+          AppLog.addOcr('Documento encontrado (con separadores): "$raw" -> $docNumber (${digits.length} dígitos)');
           break;
         }
       }
 
-      // Buscar secuencia larga de solo dígitos
+      // Secuencia larga de solo dígitos (fallback)
       final digitMatch = RegExp(r'(\d{6,15})').firstMatch(line);
       if (digitMatch != null) {
         final digits = digitMatch.group(1)!;
         if (digits.length >= 6 && digits.length <= 15) {
           docNumber = digits;
-          AppLog.addOcr('Documento encontrado (dígitos): $docNumber');
+          AppLog.addOcr('Documento encontrado (dígitos solos): $docNumber');
           break;
         }
       }
@@ -124,91 +144,148 @@ class OcrParser {
       return data;
     }
 
-    // 2. Buscar nombre completo
-    // En la cédula, los nombres aparecen en mayúsculas, generalmente
-    // después de palabras clave como "Nombres" o "Apellidos"
-    final nameLines = <String>[];
-    final skipWords = [
-      'REPÚBLICA', 'COLOMBIA', 'CÉDULA', 'CEDULA', 'CIUDADANÍA',
-      'CIUDADANIA', 'IDENTIFICACIÓN', 'IDENTIFICACION', 'MINISTERIO',
-      'REGISTRO', 'NACIONAL', 'DEL', 'FECHA', 'NACIMIENTO', 'LUGAR',
-      'EXPEDICIÓN', 'EXPEDICION', 'SEXO', 'GRUPO', 'SANGRE', 'RH',
-      'ESTATURA', 'HUELLA', 'DIGITAL', 'DACTILAR', 'FIRMA',
-    ];
+    // ========================================================================
+    // 2. BUSCAR NOMBRE COMPLETO
+    // ========================================================================
+    // Estrategia: Buscar las palabras clave APELLIDOS y NOMBRES,
+    // y tomar la línea adyacente (antes o después) que sea un candidato válido.
+    // En la cédula, el valor puede aparecer ANTES o DESPUÉS de la etiqueta.
+    // Ejemplo real del OCR:
+    //   "ortega plata"   ← valor (apellidos)
+    //   "apellidos"      ← etiqueta
+    //   "santiago"       ← valor (nombres)
+    //   "nombres"        ← etiqueta
 
-    bool foundNameSection = false;
+    String? apellidos;
+    String? nombres;
+
     for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
-      final upper = line.toUpperCase();
+      final upper = lines[i].toUpperCase().replaceAll(RegExp(r'[^A-ZÁÉÍÓÚÑÜ]'), '');
 
-      // Detectar si estamos en la sección de nombres
-      if (upper.contains('NOMBRE') || upper.contains('APELLIDO')) {
-        foundNameSection = true;
-        // El nombre puede estar en la misma línea después de "Nombres:"
-        final colonIdx = line.indexOf(':');
-        if (colonIdx >= 0 && colonIdx < line.length - 2) {
-          final afterColon = line.substring(colonIdx + 1).trim();
-          if (afterColon.length > 2 && RegExp(r'^[A-Za-zÁÉÍÓÚÑÜ\s]+$').hasMatch(afterColon)) {
-            nameLines.add(afterColon.toUpperCase());
+      // --- Buscar APELLIDOS ---
+      if (upper.contains('APELLIDO') && apellidos == null) {
+        // Intentar valor en la misma línea después de ":"
+        final colonIdx = lines[i].indexOf(':');
+        if (colonIdx >= 0 && colonIdx < lines[i].length - 2) {
+          final afterColon = lines[i].substring(colonIdx + 1).trim();
+          if (_isNameCandidate(afterColon)) {
+            apellidos = _formatName(afterColon);
+            AppLog.addOcr('Apellidos (misma línea): $apellidos');
+            continue;
           }
         }
-        continue;
+        // Línea ANTES de la etiqueta
+        if (i > 0 && _isNameCandidate(lines[i - 1])) {
+          apellidos = _formatName(lines[i - 1]);
+          AppLog.addOcr('Apellidos (línea anterior): $apellidos');
+          continue;
+        }
+        // Línea DESPUÉS de la etiqueta
+        if (i + 1 < lines.length && _isNameCandidate(lines[i + 1])) {
+          apellidos = _formatName(lines[i + 1]);
+          AppLog.addOcr('Apellidos (línea siguiente): $apellidos');
+          continue;
+        }
       }
 
-      if (foundNameSection || i >= 1) {
-        // Buscar líneas que sean solo texto en mayúsculas (nombres en la cédula)
-        final cleaned = line.replaceAll(RegExp(r'[^\w\sÁÉÍÓÚÑÜ]'), '').trim();
-        if (cleaned.length > 2 &&
-            RegExp(r'^[A-Za-zÁÉÍÓÚÑÜ\s]+$').hasMatch(cleaned)) {
-          final upperCleaned = cleaned.toUpperCase();
-          bool isSkipWord = false;
-          for (final skip in skipWords) {
-            if (upperCleaned == skip || upperCleaned == '$skip:') {
-              isSkipWord = true;
-              break;
-            }
+      // --- Buscar NOMBRES ---
+      if (upper.contains('NOMBRE') && !upper.contains('APELLIDO') && nombres == null) {
+        // Intentar valor en la misma línea después de ":"
+        final colonIdx = lines[i].indexOf(':');
+        if (colonIdx >= 0 && colonIdx < lines[i].length - 2) {
+          final afterColon = lines[i].substring(colonIdx + 1).trim();
+          if (_isNameCandidate(afterColon)) {
+            nombres = _formatName(afterColon);
+            AppLog.addOcr('Nombres (misma línea): $nombres');
+            continue;
           }
-          if (!isSkipWord && !upperCleaned.contains('REPÚBLICA') && !upperCleaned.contains('COLOMBIA')) {
-            nameLines.add(upperCleaned);
-          }
+        }
+        // Línea ANTES de la etiqueta
+        if (i > 0 && _isNameCandidate(lines[i - 1])) {
+          nombres = _formatName(lines[i - 1]);
+          AppLog.addOcr('Nombres (línea anterior): $nombres');
+          continue;
+        }
+        // Línea DESPUÉS de la etiqueta
+        if (i + 1 < lines.length && _isNameCandidate(lines[i + 1])) {
+          nombres = _formatName(lines[i + 1]);
+          AppLog.addOcr('Nombres (línea siguiente): $nombres');
+          continue;
         }
       }
     }
 
-    if (nameLines.isNotEmpty) {
-      // Tomar las primeras líneas que sean nombres (apellidos + nombres)
-      data.fullName = nameLines.take(3).join(' ');
+    // Combinar: nombres primero, luego apellidos (formato colombiano)
+    if (nombres != null || apellidos != null) {
+      data.fullName = [nombres, apellidos].whereType<String>().join(' ');
       data.confidence = 'high';
+      AppLog.addOcr('Nombre completo: "${data.fullName}"');
     }
 
-    // 3. Si no encontramos nombre con la estrategia anterior, buscar líneas largas en mayúsculas
+    // ========================================================================
+    // 3. FALLBACK — Si no se encontró nombre con palabras clave
+    // ========================================================================
     if (data.fullName.isEmpty) {
+      AppLog.addOcr('Fallback: buscando nombres sin palabras clave...');
       final candidateLines = <String>[];
       for (final line in lines) {
-        final cleaned = line.replaceAll(RegExp(r'[^\w\sÁÉÍÓÚÑÜ]'), '').trim();
-        if (cleaned.length > 3 &&
-            cleaned.toUpperCase() == cleaned && // Todo en mayúsculas
-            RegExp(r'^[A-Za-zÁÉÍÓÚÑÜ\s]+$').hasMatch(cleaned)) {
-          bool isSkip = false;
-          for (final skip in skipWords) {
-            if (cleaned.toUpperCase().contains(skip)) {
-              isSkip = true;
-              break;
-            }
-          }
-          if (!isSkip) {
-            candidateLines.add(cleaned.toUpperCase());
-          }
+        if (_isNameCandidate(line)) {
+          candidateLines.add(_formatName(line));
         }
       }
       if (candidateLines.isNotEmpty) {
         data.fullName = candidateLines.take(3).join(' ');
-        data.confidence = 'medium';
+        data.confidence = 'low';
+        AppLog.addOcr('Nombre (fallback): "${data.fullName}"');
       }
     }
 
     AppLog.addOcr('Resultado: doc=${data.documentNumber}, nombre=${data.fullName}, confianza=${data.confidence}');
     return data;
+  }
+
+  /// Verifica si una línea es candidata a ser un nombre (no es etiqueta, número, etc.)
+  static bool _isNameCandidate(String text) {
+    final cleaned = text.trim();
+    if (cleaned.length < 2) return false;
+
+    final upper = cleaned.toUpperCase();
+
+    // Rechazar si es una palabra de salto (etiqueta de la cédula)
+    for (final skip in _skipWords) {
+      if (upper == skip || upper == '$skip:' || upper == '$skip :') {
+        return false;
+      }
+    }
+
+    // Rechazar si contiene palabras institucionales
+    final institutionalWords = ['REPUBLICA', 'REPÚBLICA', 'COLOMBIA', 'IDENTIFICACION',
+      'IDENTIFICACIÓN', 'PERSONAL', 'TARJETA', 'IDENTIDAD', 'CEDULA', 'CÉDULA',
+      'CIUDADANIA', 'CIUDADANÍA', 'NUMERO', 'NÚMERO', 'MINISTERIO', 'REGISTRO'];
+    for (final inst in institutionalWords) {
+      if (upper.contains(inst)) return false;
+    }
+
+    // Rechazar si tiene mayoría de dígitos (es un número, no un nombre)
+    final digitCount = cleaned.replaceAll(RegExp(r'[^0-9]'), '').length;
+    if (digitCount > 2) return false;
+
+    // Debe contener principalmente letras (incluyendo acentos y ñ)
+    final letterCount = cleaned.replaceAll(RegExp(r'[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]'), '').length;
+    if (letterCount < 2) return false;
+
+    // Debe ser mayormente letras vs otros caracteres
+    if (letterCount < cleaned.length * 0.5) return false;
+
+    return true;
+  }
+
+  /// Formatea un nombre: primera letra mayúscula, resto minúscula
+  static String _formatName(String text) {
+    return text.trim().split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty)
+        .map((w) => '${w[0].toUpperCase()}${w.substring(1).toLowerCase()}')
+        .join(' ');
   }
 }
 
