@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -629,7 +630,7 @@ class _OcrScannerPageState extends State<OcrScannerPage> {
       await _cameraController!.initialize();
 
       try {
-        await _cameraController!.setFocusMode(FocusMode.continuous);
+        await _cameraController!.setFocusMode(FocusMode.auto);
       } catch (_) {}
 
       setState(() {
@@ -1247,7 +1248,7 @@ class ResultPage extends StatelessWidget {
                       Navigator.of(context).push<CedulaData>(
                         MaterialPageRoute(builder: (_) => const OcrScannerPage()),
                       ).then((result) {
-                        if (result != null) {
+                        if (result != null && context.mounted) {
                           Navigator.of(context).pushReplacement(
                             MaterialPageRoute(builder: (_) => ResultPage(data: result)),
                           );
